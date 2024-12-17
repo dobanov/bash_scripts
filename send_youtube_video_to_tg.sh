@@ -76,7 +76,7 @@ download_and_send() {
     echo "Начинаем обработку URL: $url"
 
     # Загружаем видео с помощью yt-dlp
-    yt-dlp -f "best[height<=720][ext=mp4]" -o "video.%(ext)s" --force-overwrites "$url"
+    yt-dlp -f "bv*[height<=720]+ba/best" --merge-output-format mp4 -o "video.%(ext)s" --force-overwrites "$url"
     if [[ $? -ne 0 ]]; then
         echo "Ошибка загрузки видео для URL: $url"
         return 1
