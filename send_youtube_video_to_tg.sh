@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Настройки Telegram
+TOKEN="Token"
+CHAT_ID="Chat_ID"
+API_URL="https://api.telegram.org/bot${TOKEN}/sendVideo"
+MAX_FILE_SIZE=$((52400000)) # 50 МБ в байтах
+
 # Проверяем, что передан хотя бы один аргумент
 if [[ -z "$1" ]]; then
     echo "Использование:"
@@ -8,75 +14,62 @@ if [[ -z "$1" ]]; then
     exit 1
 fi
 
-# Максимальный размер файла в байтах (50 МБ = 52428800 байт)
-MAX_FILE_SIZE=$((52428800))
-PART_SIZE=$((51380224))
-
-# Функция для разбиения видео с сохранением заголовков
+# Функция для разбиения видео на части
 split_video() {
     local input_file="$1"
     local output_prefix="$2"
-    local max_part_size=49000000  # Максимальный размер части (байты)
-    local duration=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$input_file")
+    local max_part_size=49000000 # Чуть меньше 50 МБ, чтобы учесть метаданные
 
-    echo "Общая длительность видео: $duration секунд."
+    # Получаем общую длительность видео
+    local duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input_file")
+    local total_size=$(stat --format=%s "$input_file")
 
-    # Расчёт времени для части
-    local approx_part_time=$(bc <<< "scale=2; $duration * $max_part_size / $(stat --format=%s "$input_file")")
+    # Рассчитываем приблизительное время для одной части
+    local approx_part_time=$(echo "$duration * $max_part_size / $total_size" | bc -l)
     local part_time=$(printf "%.0f" "$approx_part_time")
 
+    # Если рассчитанное время слишком маленькое, задаем минимальное значение (10 секунд)
     if [[ $part_time -lt 10 ]]; then
-        part_time=10  # Минимальная длина части в секундах
+        part_time=10
     fi
 
-    echo "Длительность одной части: $part_time секунд."
+    # Разбиваем видео на части
+    ffmpeg -i "$input_file" -c copy -map 0 -segment_time "$part_time" -f segment -reset_timestamps 1 "${output_prefix}_%03d.mp4" >/dev/null 2>&1
 
-    # Используем ffmpeg для разбиения на части по времени
-    ffmpeg -hide_banner -i "$input_file" -c copy -map 0 -segment_time "$part_time" -f segment -reset_timestamps 1 -movflags +frag_keyframe+empty_moov "${output_prefix}_part_%03d.mp4"
+    echo "Видео успешно разбито на части."
 }
 
+# Функция для URL-кодирования строки
+urlencode() {
+    local encoded=""
+    local char
+    for (( i=0; i<${#1}; i++ )); do
+        char="${1:i:1}"
+        case "$char" in
+            [a-zA-Z0-9.~_-]) encoded+="$char" ;;
+            *) encoded+=$(printf '%%%02X' "'$char") ;;
+        esac
+    done
+    echo "$encoded"
+}
+
+# Отправляем части с корректной кодировкой caption
+send_video() {
+    local file="$1"
+    local caption="$2"
+    local encoded_caption
+    encoded_caption=$(urlencode "$caption")
+    curl -F "video=@${file}" "${API_URL}?chat_id=${CHAT_ID}&caption=${encoded_caption}&supports_streaming=true"
+}
 
 # Функция для загрузки видео и отправки
-split_and_send() {
-    local file="$1"
-    local original_url="$2"
-
-    # Проверяем размер файла
-    local file_size=$(stat --format=%s "$file")
-    if [[ $file_size -le $MAX_FILE_SIZE ]]; then
-        # Если файл меньше 50 МБ, отправляем его напрямую
-        echo "Отправка файла $file (размер: $file_size байт)"
-        curl -F "video=@./$output_file" "https://api.telegram.org/bot<BOT_TOKEN>/sendVideo?chat_id=<CHAT_ID>&caption=$url&supports_streaming=true"
-        return $?
-    fi
-
-    # Если файл больше 50 МБ, разбиваем на части с сохранением заголовков
-    local output_prefix="${file%.*}"
-    split_video "$file" "$output_prefix"
-
-    # Отправляем каждую часть
-    for part in ${output_prefix}_part_*.mp4; do
-        echo "Отправка части: $part"
-        caption=$(echo "$original_url (часть $(basename "$part"))" | jq -sRr @uri)
-        curl -F "video=@./$part" "https://api.telegram.org/bot<BOT_TOKEN>/sendVideo?chat_id=<CHAT_ID>&caption=$caption&supports_streaming=true"
-        if [[ $? -ne 0 ]]; then
-            echo "Ошибка отправки части: $part"
-        else
-            echo "Часть $part успешно отправлена."
-        fi
-    done
-
-    # Удаляем части после отправки
-    rm -f ${output_prefix}_part_*.mp4
-}
-
 download_and_send() {
     local url="$1"
     local output_file="video.mp4"
     echo "Начинаем обработку URL: $url"
 
     # Загружаем видео с помощью yt-dlp
-    yt-dlp -f "bv*[height<=720]+ba/best" --merge-output-format mp4 -o "video.%(ext)s" --force-overwrites "$url"
+    yt-dlp -f "bv*[height<=720]+ba/best" --merge-output-format mp4 -o "$output_file" --force-overwrites "$url"
     if [[ $? -ne 0 ]]; then
         echo "Ошибка загрузки видео для URL: $url"
         return 1
@@ -88,11 +81,34 @@ download_and_send() {
         return 1
     fi
 
-    # Проверяем размер и отправляем (с разбиением, если необходимо)
-    split_and_send "$output_file" "$url"
+    # Проверяем размер файла
+    local file_size=$(stat --format=%s "$output_file")
+    if [[ $file_size -le $MAX_FILE_SIZE ]]; then
+        # Отправляем файл целиком
+        echo "Отправка видео для URL: $url"
+        send_video "$output_file" "$url"
+        if [[ $? -ne 0 ]]; then
+            echo "Ошибка отправки видео для URL: $url"
+            return 1
+        fi
+    else
+        # Если файл больше 50 МБ, разбиваем его на части
+        echo "Видео превышает 50 МБ. Разбиваем на части..."
+        split_video "$output_file" "video_part"
+        for part in video_part_*.mp4; do
+            echo "Отправка части $part для URL: $url"
+            send_video "$part" "$url (часть $part)"
+            if [[ $? -ne 0 ]]; then
+                echo "Ошибка отправки части $part для URL: $url"
+                return 1
+            fi
+            rm -f "$part" # Удаляем отправленную часть
+        done
+    fi
 
-    # Удаляем оригинальный файл после обработки
+    # Удаляем исходное видео
     rm -f "$output_file"
+    echo "Успешно обработан URL: $url"
 }
 
 # Проверяем аргумент
@@ -113,4 +129,3 @@ else
     echo "Обработка одиночного URL: $input"
     download_and_send "$input"
 fi
-
