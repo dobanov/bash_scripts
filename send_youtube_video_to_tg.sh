@@ -14,6 +14,25 @@ if [[ -z "$1" ]]; then
     exit 1
 fi
 
+# Функция для проверки корректности параметра
+validate_input() {
+    local input="$1"
+
+    if [[ -f "$input" && "${input##*.}" == "txt" ]]; then
+        echo "Параметр '$input' распознан как текстовый файл."
+        return 0
+    elif [[ "$input" =~ ^https://www\.youtube\.com/watch\?v= ]]; then
+        echo "Параметр '$input' распознан как валидный YouTube URL."
+        return 0
+    else
+        echo "Ошибка: Параметр '$input' не является ни валидным YouTube URL, ни текстовым файлом с URL."
+        echo "Использование:"
+        echo "  $0 <URL>               # Загрузить одно видео"
+        echo "  $0 <file.txt>          # Загрузить видео из файла с URL"
+        exit 1
+    fi
+}
+
 # Функция для разбиения видео на части
 split_video() {
     local input_file="$1"
@@ -114,6 +133,9 @@ download_and_send() {
 # Проверяем аргумент
 input="$1"
 
+# Выполняем проверку переданного параметра
+validate_input "$input"
+
 if [[ -f "$input" && "${input##*.}" == "txt" ]]; then
     # Если аргумент — это файл с расширением .txt
     echo "Обработка файла с URL: $input"
@@ -125,7 +147,7 @@ if [[ -f "$input" && "${input##*.}" == "txt" ]]; then
     done < "$input"
 
 else
-    # Если аргумент — это, скорее всего, URL
+    # Если аргумент — это валидный URL
     echo "Обработка одиночного URL: $input"
     download_and_send "$input"
 fi
